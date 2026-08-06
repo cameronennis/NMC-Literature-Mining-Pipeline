@@ -1,0 +1,8 @@
+filename,panel,x_min,x_max,x_unit,y_min,y_max,y_unit
+GraphEx1.png,1,0,800,mAh,2.5,4.5,V
+GraphEx2ChargeDischarge.png,1,0,300,mAh/g,1.2,3.0,V
+GraphEx3Stacked.png,1,0,250,mAh/g,2.75,4.75,V
+GraphEx3Stacked.png,2,0,250,mAh/g,2.75,4.75,V
+GraphEx3Stacked.png,3,0,250,mAh/g,2.75,4.75,V
+GraphEx3Stacked.png,4,0,250,mAh/g,2.75,4.75,V
+GraphEx3Stacked.png,5,0,250,mAh/g,2.75,4.75,V
