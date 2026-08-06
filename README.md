@@ -46,16 +46,16 @@ stage (lazily), so intake/trace/compile work without a key.
 
 ```bash
 # Cheap trial: 5 figures, watch the verdicts and cost before committing
-voltage-tracer --pdf-dir "Top 21/pdf/Papers" --out-dir run --limit 5
+voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --limit 5
 
 # Full run
-voltage-tracer --pdf-dir "Top 21/pdf/Papers" --out-dir run
+voltage-tracer --pdf-dir <paper pdf directory> --out-dir run
 
 # Re-trace / re-compile without re-paying for reasoning
-voltage-tracer --pdf-dir "Top 21/pdf/Papers" --out-dir run --no-reason
+voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --no-reason
 
 # Reconcile a reused out-dir to the current PDFs (prune stale, skip identical re-renders)
-voltage-tracer --pdf-dir "Top 21/pdf/Papers" --out-dir run --fresh
+voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --fresh
 ```
 
 **Reusing an `--out-dir`.** By default a run overwrites same-named files but
