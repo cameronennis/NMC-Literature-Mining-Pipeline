@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voltage-tracer"
+version = "0.1.0"
+description = "Digitize first-cycle voltage-vs-capacity curves from NMC battery-paper figures into areal power vs. time."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "scikit-image",
+    "scipy",
+    "pydantic>=2",
+    "matplotlib",
+    "pymupdf",
+    "anthropic",  # only the reason stage uses it; imported lazily
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+voltage-tracer = "voltage_tracer.run:main"
+
+[tool.setuptools]
+packages = ["voltage_tracer"]
+
+[tool.pytest.ini_options]
+testpaths = ["voltage_tracer/tests"]
