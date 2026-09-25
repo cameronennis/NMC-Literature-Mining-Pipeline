@@ -17,7 +17,7 @@ import numpy as np
 
 from voltage_tracer.calibrate import calibrate_all
 from voltage_tracer.contract import Contract, load_contract
-from voltage_tracer.metrics import FigureMetrics, compute_metrics
+from voltage_tracer.metrics import FigureMetrics, colored_annotation_mask, compute_metrics
 from voltage_tracer.preprocess import (
     color_mask,
     crop_to_plot_area,
@@ -78,6 +78,13 @@ def _exclusion_mask(crop, contract: Contract, metrics: FigureMetrics):
         | mask_regions(crop.shape[:2], metrics.swatch_regions)
         | mask_legend_region(crop, override_bbox=legend_bbox)
         | mask_outside_data_region(crop.shape[:2], contract.data_region_frac)
+        # coloured labels/arrows that share a series colour (small isolated
+        # blobs only; a curve or its drop is one large component, spared)
+        | (colored_annotation_mask(
+               crop, sorted({s.color_rgb for s in contract.series}),
+               metrics.color_tol, metrics.line_width_px, metrics.d)
+           if metrics.d.annot_detect_colored
+           else np.zeros(crop.shape[:2], dtype=bool))
     )
 
 
@@ -96,7 +103,8 @@ def trace_figure(
     # from a real end.
     group_cmask = {
         rgb: remove_small_components(
-            color_mask(crop, rgb, tolerance=metrics.color_tol) & ~exclude,
+            color_mask(crop, rgb, tolerance=metrics.color_tol,
+                       hue_recover=True) & ~exclude,
             min_area=metrics.speckle_min_area,
         )
         for rgb in groups
@@ -107,15 +115,19 @@ def trace_figure(
         cmask = group_cmask[rgb]
         runs = extract_column_runs(skeletonize_mask(cmask), merge_gap=metrics.merge_gap)
         columns = {x: [mean for _, _, mean in rs] for x, rs in runs.items()}
-        group_tracks = track_columns(columns, contract, metrics, series_ids=ids)
-        # reconnect a curve hidden under another colour for a long stretch,
-        # BEFORE the terminal-drop pass so the drop extends from the recovered
-        # (later) segment's end. Occlusion evidence = the other colours' runs.
+        # the other colours' runs: occlusion evidence, used both to coast a
+        # track alive through an over-drawn stretch DURING tracking and to
+        # bridge/terminal-extend afterwards.
         other = np.zeros(cmask.shape, dtype=bool)
         for orgb, om in group_cmask.items():
             if orgb != rgb:
                 other |= om
         other_runs = extract_column_runs(skeletonize_mask(other), merge_gap=metrics.merge_gap)
+        group_tracks = track_columns(columns, contract, metrics,
+                                     series_ids=ids, other_runs=other_runs)
+        # reconnect a curve hidden under another colour for a long stretch,
+        # BEFORE the terminal-drop pass so the drop extends from the recovered
+        # (later) segment's end.
         bridge_occluded_segments(group_tracks, columns, other_runs, contract, metrics)
         # a locally-lenient mask feeds only the terminal-drop extension: a
         # steep fall dilutes its ink below the strict tolerance

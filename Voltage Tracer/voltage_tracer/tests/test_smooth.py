@@ -49,8 +49,13 @@ def test_endpoints_pinned_exactly():
     xs = np.arange(0, 120)
     t, _ = _noisy_track(lambda x: 80.0 + 0.5 * x, xs, sign=+1, noise=2.0, seed=2)
     smooth_track(t, _metrics(), 1)
+    # the start pins to the raw endpoint exactly
     assert t.points_smooth[0] == (t.points_raw[0][0], t.points_raw[0][1])
-    assert t.points_smooth[-1] == (t.points_raw[-1][0], t.points_raw[-1][1])
+    # the end pins to the raw endpoint too, unless doing so would dip against
+    # the declared (increasing) direction -- then it holds the monotone value
+    x_last, y_last_raw = t.points_raw[-1]
+    assert t.points_smooth[-1][0] == x_last
+    assert t.points_smooth[-1][1] == pytest.approx(max(y_last_raw, t.points_smooth[-2][1]))
 
 
 def test_non_destructive_raw_unchanged():
@@ -93,6 +98,28 @@ def test_terminal_drop_corner_preserved():
     assert abs(sm[-1] - ys[-1]) <= _metrics().line_width_px
     # the drop stays steep: last-segment slope close to raw
     assert sm[-1] - sm[-13] > 100.0
+
+
+def test_terminal_dip_does_not_truncate_peak():
+    # a charge (pixel y decreasing = voltage rising) that climbs to a peak,
+    # then the final raw point dips slightly back -- a small terminal hook.
+    # The smoothed tail must still reach the true peak, not be clamped down to
+    # the non-extreme endpoint value. (Regression: P18 fig2a Li3InCl6/Li3PS4
+    # charge, where the smoothed curve flatlined over the last ~6%.)
+    ys = [300.0 - 1.7 * k for k in range(118)]  # pixel y falls to ~101 (peak)
+    ys += [112.0, 130.0]                         # final points hook back up
+    xs = list(range(len(ys)))
+    info = [PointInfo(True, 2, 0.0) for _ in xs]  # ordinary confidence
+    t = Track("t", "s", "increasing", pixel_sign=-1,
+              points_raw=[(int(x), float(y)) for x, y in zip(xs, ys)], info_raw=info)
+    smooth_track(t, _metrics(), 1)
+    sm = np.array([p[1] for p in t.points_smooth])
+    true_peak = min(ys)   # smallest pixel y = highest voltage
+    endpoint = ys[-1]     # the dipped final point
+    # the smoothed peak must approach the real peak, well past the endpoint it
+    # used to be clamped to (old bug: sm.min() stuck at ~endpoint)
+    assert sm.min() < endpoint - 5.0
+    assert sm.min() <= true_peak + 3 * _metrics().line_width_px
 
 
 # --- confidence weighting ---

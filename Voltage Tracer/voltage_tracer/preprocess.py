@@ -187,15 +187,20 @@ def mask_legend_region(
     min_extent: float = 0.3,
     text_search_px: int = 30,
     pad_px: int = 10,
+    curve_spare_hfrac: float = 0.5,
 ) -> np.ndarray:
     """Boolean mask (True = legend region to exclude).
 
-    If the contract supplies `legend_bbox_px`, pass it as `override_bbox`
-    and exactly that region is masked -- no detection. Otherwise a simple
-    heuristic: legend swatches are small, compact, isolated blobs of
-    saturated color sitting next to dark text-like pixels, whereas data
-    curves are long low-"extent" strokes. Each detected swatch's bbox is
-    padded and extended toward its neighboring text before masking.
+    If the contract supplies `legend_bbox_px`, pass it as `override_bbox`: that
+    rectangle is masked, EXCEPT a colored curve that merely transits it. A
+    reasoning-stage legend box is often drawn too large and clips a curve (e.g.
+    a discharge terminal drop passing under the legend); full-masking would
+    erase that drop. So a saturated stroke spanning at least `curve_spare_hfrac`
+    of the box height -- a curve passing through, not a short colour swatch or
+    achromatic text -- is spared, mirroring how `mask_text_ink` keeps a colored
+    curve that runs through a text label. Otherwise a simple heuristic: legend
+    swatches are small, compact, isolated blobs of saturated color sitting next
+    to dark text-like pixels, whereas data curves are long low-"extent" strokes.
 
     Deliberately conservative: masking nothing (all-False) is a safe
     failure mode, since the tracker just sees a legend swatch as a short
@@ -208,7 +213,24 @@ def mask_legend_region(
         x0, y0, x1, y1 = override_bbox
         x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
         x1, y1 = min(w, int(round(x1))), min(h, int(round(y1)))
+        if x1 <= x0 or y1 <= y0:
+            return mask
         mask[y0:y1, x0:x1] = True
+        # spare a curve transiting the box: a saturated component tall enough to
+        # span the box is a passing-through stroke, not a swatch or text.
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        sat = (hsv[y0:y1, x0:x1, 1] > sat_thresh) & (hsv[y0:y1, x0:x1, 2] > sat_thresh)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(
+            sat.astype(np.uint8), connectivity=8
+        )
+        spare = np.zeros_like(sat, dtype=bool)
+        for i in range(1, num):
+            if stats[i, cv2.CC_STAT_HEIGHT] >= curve_spare_hfrac * (y1 - y0):
+                spare |= labels == i
+        if spare.any():
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            spare = cv2.dilate(spare.astype(np.uint8), k).astype(bool)
+            mask[y0:y1, x0:x1][spare] = False
         return mask
 
     hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
@@ -268,6 +290,10 @@ def color_mask(
     color_rgb: tuple[int, int, int],
     tolerance: float = 25.0,
     achromatic_chroma: float = 20.0,
+    hue_recover: bool = False,
+    hue_tol_deg: float = 40.0,
+    hue_chroma_min: float = 10.0,
+    hue_lightness_margin: float = 20.0,
 ) -> np.ndarray:
     """Boolean mask of pixels matching `color_rgb`.
 
@@ -283,7 +309,19 @@ def color_mask(
     compression smears a black curve's lightness across a wide range while
     leaving it colorless. Dispatch instead on the achromatic criterion:
     low chroma AND lightness within a generous band of the target
-    (3x tolerance, one-sided toward the background)."""
+    (3x tolerance, one-sided toward the background).
+
+    `hue_recover` (chromatic targets only): a distance sphere keyed off a
+    bright, saturated reference also misses a curve's OWN pixels where anti-
+    aliasing/JPEG darkens and desaturates it -- a bunched low-capacity IR
+    drop, a thin crossing -- even though those pixels keep the target's HUE.
+    When set, union in pixels whose Lab hue angle is within `hue_tol_deg` of
+    the target's, that are colored enough for a reliable hue
+    (`hue_chroma_min`), and that are darker than the near-white background by
+    `hue_lightness_margin` (so a pale tinted background is never swept in).
+    Distinct-hued series (the norm) stay separable; this never widens toward
+    a neighbour's hue. Off by default: enabled for the strict tracking mask,
+    not for line-width measurement or the already-generous lenient mask."""
     lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
     target = cv2.cvtColor(
         np.uint8([[color_rgb]]), cv2.COLOR_RGB2LAB
@@ -299,4 +337,18 @@ def color_mask(
         )
 
     dist = np.linalg.norm(lab - target, axis=-1)
-    return dist <= tolerance
+    mask = dist <= tolerance
+    if hue_recover:
+        a, b = lab[..., 1] - 128, lab[..., 2] - 128
+        chroma = np.hypot(a, b)
+        px_hue = np.degrees(np.arctan2(b, a))
+        t_hue = np.degrees(np.arctan2(target[2] - 128, target[1] - 128))
+        d_hue = np.abs((px_hue - t_hue + 180.0) % 360.0 - 180.0)
+        white_l = float(np.percentile(lab[..., 0], 92))
+        hue_ok = (
+            (d_hue <= hue_tol_deg)
+            & (chroma >= hue_chroma_min)
+            & (lab[..., 0] <= white_l - hue_lightness_margin)
+        )
+        mask = mask | hue_ok
+    return mask

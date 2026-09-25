@@ -529,6 +529,182 @@ def test_bridge_reconnects_across_occluded_gap():
     assert all(b >= a - METRICS.reversal_tol_px for a, b in zip(ys, ys[1:]))
 
 
+# --- coherence gate: reject a scattered, non-curve track -------------------
+
+def _triangle_band(width, amp=9.0, period=16):
+    """A flat zig-zag band (no net rise, oscillates within the reversal
+    tolerance) sampled one candidate per column -- the shape the tracker
+    latches onto in a colour's overlap smear, not a real voltage curve."""
+    base = v_to_py(3.2)
+    return {
+        int(x): [float(base + amp * (2 * abs((x % period) / period - 0.5)))]
+        for x in range(width)
+    }
+
+
+def _charge_contract():
+    return make_contract(
+        [{"id": "chg", "color_rgb": [255, 0, 0], "label": "c",
+          "direction": "increasing"}]
+    )
+
+
+def test_isotonic_increasing_pools_violators():
+    from voltage_tracer.tracker import _isotonic_increasing
+    out = _isotonic_increasing(np.array([3.0, 1.0, 2.0, 5.0, 4.0]))
+    assert out.tolist() == [2.0, 2.0, 2.0, 4.5, 4.5]
+
+
+def test_directional_scatter_ignores_curvature_flags_wander():
+    from voltage_tracer.tracker import _directional_scatter
+    # a curved BUT monotone charge (pixel y falls): coherent -> ~0
+    ys = [100.0 - 30.0 * (1.0 - np.exp(-x / 25.0)) for x in range(80)]
+    curved = Track("t", "s", "increasing", pixel_sign=-1,
+                   points_raw=[(x, float(y)) for x, y in enumerate(ys)])
+    assert _directional_scatter(curved) < 0.02
+    # a flat noisy band wandering against the declared direction -> high
+    rng = np.random.default_rng(1)
+    band = Track("t", "s", "increasing", pixel_sign=-1,
+                 points_raw=[(x, float(50.0 + v)) for x, v in
+                             enumerate(rng.normal(0, 5.0, 80))])
+    assert _directional_scatter(band) > 0.12
+
+
+def test_coherence_gate_drops_wide_scatter_band():
+    # a wide scattered band (spanning most of the plot) is not a real curve
+    tracks = track_columns(_triangle_band(45), _charge_contract(), METRICS)
+    assert tracks == [], "a wide flat scatter band must not be kept as a curve"
+
+
+def test_coherence_gate_keeps_short_scatter_stub():
+    # the SAME wiggle, but too short to span the coherence-gate minimum, is
+    # left alone -- a tiny fragment is a separate concern (its span makes the
+    # ratio metric unreliable), not "a full curve traced from chaos".
+    assert METRICS.coherence_min_span_cols == 40
+    tracks = track_columns(_triangle_band(39), _charge_contract(), METRICS)
+    assert len(tracks) == 1, "a short fragment must not be judged by the gate"
+
+
+def test_coherence_gate_keeps_clean_curve():
+    # a clean monotone rise spanning the plot survives the gate untouched
+    charge = lambda x: 3.0 + 1.0 * x / 300
+    columns = columns_from_curves({"chg": charge}, range(0, 300))
+    tracks = track_columns(columns, _charge_contract(), METRICS)
+    t = get_track(tracks, "chg")
+    assert len(t.points) > 280
+
+
+def _kink_track(tail_ys):
+    from voltage_tracer.tracker import Track, PointInfo
+    ys = list(range(100, 200, 8)) + list(tail_ys)   # steep descent then a tail
+    xs = list(range(len(ys)))
+    return Track("t", "s", "decreasing", pixel_sign=+1,
+                 points_raw=[(x, float(y)) for x, y in zip(xs, ys)],
+                 info_raw=[PointInfo(True, 1, 0.0) for _ in ys], y_extremum=max(ys))
+
+
+def test_trim_kink_truncates_steep_reversal():
+    from voltage_tracer.tracker import _trim_kink
+    t = _kink_track([190, 190, 190, 190])  # jog back up + flat (onto an annot)
+    _trim_kink(t, METRICS)
+    ys = [y for _, y in t.points_raw]
+    assert max(ys) == 196 and ys[-1] == 196, "did not cut back to the steep point"
+    assert all(b >= a for a, b in zip(ys, ys[1:])), "reversal jog was retained"
+
+
+def test_trim_kink_spares_decelerating_drop_bottom():
+    from voltage_tracer.tracker import _trim_kink
+    t = _kink_track([200, 203, 205, 206])  # decelerates, never reverses
+    before = len(t.points_raw)
+    _trim_kink(t, METRICS)
+    assert len(t.points_raw) == before, "a real drop bottom was truncated"
+
+
+def test_trim_kink_spares_gentle_curve():
+    from voltage_tracer.tracker import Track, PointInfo, _trim_kink
+    ys = [100.0 + 0.5 * x for x in range(60)]  # gentle slope, well below steep
+    t = Track("t", "s", "decreasing", pixel_sign=+1,
+              points_raw=[(x, y) for x, y in enumerate(ys)],
+              info_raw=[PointInfo(True, 1, 0.0) for _ in ys], y_extremum=max(ys))
+    _trim_kink(t, METRICS)
+    assert len(t.points_raw) == 60, "a gentle curve was truncated"
+
+
+def _occluded_charge_columns(gap_lo, gap_hi, hidden_to_end=False):
+    """A rising charge whose own pixels vanish over [gap_lo, gap_hi] (a decoy
+    candidate far away keeps those columns in the dict, as the other curve
+    would). Returns (columns, charge_fn)."""
+    charge = lambda x: 3.0 + 0.6 * x / 100.0
+    columns = {}
+    for x in range(0, 101):
+        hidden = gap_lo <= x <= gap_hi or (hidden_to_end and x >= gap_lo)
+        columns[x] = [v_to_py(charge(x)) - 60 if hidden else v_to_py(charge(x))]
+    return columns, charge
+
+
+def _other_runs_over(charge, lo, hi):
+    return {x: [(v_to_py(charge(x)) - 4, v_to_py(charge(x)) + 4, v_to_py(charge(x)))]
+            for x in range(lo, hi)}
+
+
+def test_occlusion_coast_survives_other_colour_gap():
+    # pre-gap span exceeds the deactivation tolerance (so the dead track is not
+    # released and the reappearance cannot simply re-bind), and the gap exceeds
+    # it too -- only coasting survives it.
+    columns, charge = _occluded_charge_columns(41, 90)
+    other = _other_runs_over(charge, 41, 91)
+    def reach(tracks):
+        c = [t for t in tracks if t.series_id == "chg"]
+        return max((x for x, _ in c[0].points_raw), default=0) if c else 0
+    off = track_columns(columns, _charge_contract(), METRICS)
+    on = track_columns(columns, _charge_contract(), METRICS, other_runs=other)
+    assert reach(off) < 60, "should have died in the gap without occlusion info"
+    assert reach(on) >= 95, "should coast through the occlusion and re-acquire"
+
+
+def test_coasted_tail_trimmed_when_curve_never_reappears():
+    columns, charge = _occluded_charge_columns(51, 100, hidden_to_end=True)
+    other = _other_runs_over(charge, 51, 101)
+    tracks = track_columns(columns, _charge_contract(), METRICS, other_runs=other)
+    c = [t for t in tracks if t.series_id == "chg"]
+    assert c, "charge lost entirely"
+    assert max(x for x, _ in c[0].points_raw) <= 55, "coast past the end not trimmed"
+    assert all(i.observed for i in c[0].info_raw), "trailing coasted points retained"
+
+
+def test_extend_head_backward_recovers_lead_in_on_correct_branch():
+    from voltage_tracer.tracker import Track, PointInfo, _extend_head_backward
+    # a charge branch (pixel y falls as x rises -> pixel_sign -1) with a
+    # discharge sitting ABOVE it (smaller pixel y = the wrong side). The
+    # lead-in must walk back along the charge and never hop to the discharge.
+    charge = lambda x: 200.0 - 0.8 * x
+    discharge = lambda x: 90.0 + 0.3 * x
+    columns = {x: [charge(x), discharge(x)] for x in range(10, 101)}
+    pts = [(x, charge(x)) for x in range(50, 101)]  # only the tail was tracked
+    t = Track("track_chg", "chg", "increasing", points_raw=pts, pixel_sign=-1,
+              info_raw=[PointInfo(True, 2, 0.0) for _ in pts],
+              y_extremum=min(charge(x) for x in range(50, 101)))
+    _extend_head_backward(t, columns, METRICS)
+    xs = [x for x, _ in t.points_raw]
+    assert min(xs) <= 12, "did not extend back over the consumed lead-in"
+    for x, y in t.points_raw:
+        assert abs(y - charge(x)) < 2.0, f"lead-in grabbed wrong branch at x={x}"
+
+
+def test_extend_head_backward_stops_without_on_direction_candidate():
+    from voltage_tracer.tracker import Track, PointInfo, _extend_head_backward
+    # nothing but a wrong-side (discharge) branch to the left -> a genuinely
+    # mid-plot-starting curve must NOT be pulled backward into it.
+    charge = lambda x: 200.0 - 0.8 * x
+    columns = {x: [90.0 + 0.3 * x] for x in range(10, 50)}  # only wrong side
+    pts = [(x, charge(x)) for x in range(50, 101)]
+    t = Track("track_chg", "chg", "increasing", points_raw=pts, pixel_sign=-1,
+              info_raw=[PointInfo(True, 2, 0.0) for _ in pts],
+              y_extremum=min(charge(x) for x in range(50, 101)))
+    _extend_head_backward(t, columns, METRICS)
+    assert min(x for x, _ in t.points_raw) == 50, "extended into the wrong branch"
+
+
 def test_no_bridge_when_gap_is_empty():
     from voltage_tracer.tracker import bridge_occluded_segments
     t = _discharge_track()
@@ -554,3 +730,59 @@ def test_bridge_rejects_steep_join():
     other = _occluding_runs(20, 130.0, 60, 330.0)
     bridge_occluded_segments([t], cols, other, _bridge_contract(), METRICS)
     assert t.last_x == 20, "accepted a steep (drop-like) join"
+
+
+# --- annotation-flat trim (a horizontal figure line mistraced as curve) ------
+
+def _mk(pts):
+    ys = [y for _, y in pts]
+    return Track("t", "dis", "decreasing", points_raw=list(pts),
+                 pixel_sign=1, y_extremum=max(ys))
+
+
+def test_flat_trim_removes_dead_flat_tail():
+    from voltage_tracer.tracker import _trim_annotation_flats
+    # a descending curve, then a DEAD-flat tail (an annotation line at y=140)
+    desc = [(x, 100.0 + x) for x in range(0, 41)]       # slope +1 (pixel-down)
+    flat = [(x, 140.0) for x in range(41, 91)]          # 49px dead flat
+    t = _mk(desc + flat)
+    _trim_annotation_flats(t, METRICS)
+    # the long dead-flat tail is gone (track ends back on the descending part;
+    # a point or two adjacent to the flat level may be absorbed, which is fine)
+    assert t.last_x <= 40, "dead-flat annotation tail not removed"
+    assert len(t.points_raw) <= 41
+
+
+def test_flat_trim_keeps_gentle_real_plateau():
+    from voltage_tracer.tracker import _trim_annotation_flats
+    # a gentle plateau: drifts ~0.3px/col -> more than the dead-flat band over
+    # any 5%-width window, so it is NOT an annotation
+    t = _mk([(x, 100.0 + 0.3 * x) for x in range(0, 61)])
+    before = list(t.points_raw)
+    _trim_annotation_flats(t, METRICS)
+    assert t.points_raw == before, "a real gentle plateau was wrongly trimmed"
+
+
+def test_flat_trim_keeps_continuation_past_the_line():
+    from voltage_tracer.tracker import _trim_annotation_flats
+    # descend, hide under a horizontal line, then RESUME the descent where it
+    # would have been -> the flat is excised but the continuation survives
+    desc = [(x, 100.0 + x) for x in range(0, 31)]                 # to (30,130)
+    flat = [(x, 130.0) for x in range(31, 61)]                    # annotation
+    cont = [(x, 100.0 + x) for x in range(61, 91)]               # on-trend resume
+    t = _mk(desc + flat + cont)
+    _trim_annotation_flats(t, METRICS)
+    xs = [x for x, _ in t.points_raw]
+    assert max(xs) == 90, "genuine continuation past the line was dropped"
+    assert not any(y == 130.0 and 31 <= x <= 60 for x, y in t.points_raw), "flat kept"
+
+
+def test_flat_trim_ignores_flat_start_no_cusp():
+    from voltage_tracer.tracker import _trim_annotation_flats
+    # flat AT THE START (no cusp into it) is left alone
+    flat = [(x, 100.0) for x in range(0, 31)]
+    desc = [(x, 100.0 + (x - 30)) for x in range(31, 61)]
+    t = _mk(flat + desc)
+    before = list(t.points_raw)
+    _trim_annotation_flats(t, METRICS)
+    assert t.points_raw == before, "a flat start (no cusp) was wrongly trimmed"

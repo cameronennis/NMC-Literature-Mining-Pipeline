@@ -126,6 +126,30 @@ def test_dual_resolution_traces_are_identical_normalized():
         )
 
 
+def test_colored_annotation_masks_label_and_rule_but_spares_curve():
+    from voltage_tracer.metrics import colored_annotation_mask
+    red = (220, 20, 20)
+    img = np.full((200, 320, 3), 245, np.uint8)  # pale background
+    cv2.line(img, (10, 185), (300, 20), red, 2)   # a curve: one big component
+    cv2.line(img, (150, 150), (250, 150), red, 2)  # a horizontal rule/arrow
+    for gx in (110, 123, 136):                     # 3 glyph-like blobs = a label
+        img[95:114, gx:gx + 9] = red
+    mask = colored_annotation_mask(img, [red], 45.0, 2.0, DEFAULTS)
+    assert mask[150, 200], "horizontal rule/arrow not masked"
+    assert mask[104, 114], "text label glyphs not masked"
+    # the curve (a large component) must be spared, even near the annotations
+    assert not mask[30, 285], "curve body was masked"
+    assert not mask[176, 20], "curve body was masked"
+
+
+def test_colored_annotation_empty_without_annotations():
+    from voltage_tracer.metrics import colored_annotation_mask
+    red = (220, 20, 20)
+    img = np.full((200, 320, 3), 245, np.uint8)
+    cv2.line(img, (10, 185), (300, 20), red, 2)   # only a curve, no labels/rules
+    assert not colored_annotation_mask(img, [red], 45.0, 2.0, DEFAULTS).any()
+
+
 def test_text_region_detected_and_curve_not_flagged():
     img, contract = _make_figure(2)
     crop = crop_to_plot_area(img, contract.plot_bbox_px)

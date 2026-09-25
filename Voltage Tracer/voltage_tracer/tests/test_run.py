@@ -7,7 +7,7 @@ import base64
 import json
 import os
 
-import fitz
+import pymupdf
 import pytest
 
 from voltage_tracer.run import build_client, run_corpus, run_reason
@@ -19,7 +19,7 @@ from voltage_tracer.tests.test_reason import (
 
 
 def _write_png(path, w=40, h=30):
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=w, height=h)
     page.get_pixmap().save(str(path))
     doc.close()
@@ -162,7 +162,7 @@ def test_run_reason_fills_theoretical_capacity_from_paper(tmp_path):
 
 def test_run_corpus_runs_all_stages_and_writes_manifest(tmp_path):
     pdfs = tmp_path / "pdfs"; pdfs.mkdir()
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
     page.insert_text((72, 120), "Body text above the figure.", fontsize=10)
     page.insert_text((72, 600), "Figure 1. Charge/discharge voltage profiles.", fontsize=10)
@@ -183,7 +183,7 @@ def test_run_corpus_runs_all_stages_and_writes_manifest(tmp_path):
 
 def test_run_corpus_no_reason_reuses_existing_contracts(tmp_path):
     pdfs = tmp_path / "pdfs"; pdfs.mkdir()
-    doc = fitz.open(); page = doc.new_page(width=595, height=842)
+    doc = pymupdf.open(); page = doc.new_page(width=595, height=842)
     page.insert_text((72, 120), "Body.", fontsize=10)
     page.insert_text((72, 600), "Figure 1. Voltage profiles.", fontsize=10)
     doc.save(str(pdfs / "P1.pdf")); doc.close()
@@ -234,7 +234,7 @@ def test_live_reason_on_real_figure(tmp_path):
 
 
 def _one_fig_pdf(path, caption="Figure 1. Voltage profiles."):
-    doc = fitz.open(); page = doc.new_page(width=595, height=842)
+    doc = pymupdf.open(); page = doc.new_page(width=595, height=842)
     page.insert_text((72, 120), "Body text above the figure.", fontsize=10)
     page.insert_text((72, 600), caption, fontsize=10)
     doc.save(str(path)); doc.close()

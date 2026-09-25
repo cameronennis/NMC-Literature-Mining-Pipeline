@@ -63,6 +63,7 @@ class Track:
     data_resampled: list[tuple[float, float]] | None = None
     active: bool = True
     missed: int = 0
+    coast_run: int = 0              # consecutive columns coasted through occlusion
     pixel_sign: int = 0              # expected sign of dy_px/dx (0 = unconstrained)
     y_extremum: float = float("nan")  # most-advanced y in the track's direction
 
@@ -165,6 +166,24 @@ def match_cost(
         if reversal > reversal_tol_px:
             cost += penalty
     return cost
+
+
+def _pred_is_occluded(
+    track: Track,
+    x: int,
+    other_runs: dict[int, list[tuple[float, float, float]]],
+    band: float,
+    window: int,
+) -> bool:
+    """True if the track's predicted position at column `x` is covered by
+    another colour's run there -- evidence the curve is hidden (drawn over),
+    not ended. `other_runs` are (lo, hi, mean) intervals of the union of the
+    OTHER colour groups."""
+    runs = other_runs.get(x)
+    if not runs:
+        return False
+    y_pred = predict_next_y(track, x, window)
+    return any(lo - band <= y_pred <= hi + band for lo, hi, _ in runs)
 
 
 def _expected_start_order(series: list[Series], orient: int) -> list[Series]:
@@ -328,6 +347,110 @@ def _trim_outlier_head(
             track._pop_head()
         else:
             break
+
+
+def _trim_kink(track: Track, metrics: FigureMetrics) -> None:
+    """Truncate a raw trace where a steep, near-vertical run reverses abruptly
+    (a very large second derivative). That kink is the online tracker jogging
+    off a terminal drop onto a horizontal annotation or a wrong branch; cutting
+    back to the last steep point lets `extend_terminal_drops` follow the true
+    slope down. A real curve turns gradually and a real drop bottom only
+    decelerates (never reverses), so neither is touched. Runs before the
+    terminal-drop pass."""
+    d = metrics.d
+    pts = track.points_raw
+    n = len(pts)
+    win = max(2, metrics.slope_window_cols // 2)
+    if track.pixel_sign == 0 or n < win + 2:
+        return
+    s = track.pixel_sign
+    xs = np.array([p[0] for p in pts], dtype=float)
+    ys = np.array([p[1] for p in pts], dtype=float)
+
+    def descent(i0: int, i1: int) -> float:
+        """Signed slope from point i0 to i1, positive in the declared dir."""
+        return s * (ys[i1] - ys[i0]) / (xs[i1] - xs[i0]) if xs[i1] != xs[i0] else 0.0
+
+    for i in range(win, n - 1):
+        # near-vertical descent arriving at i (measured over the trailing window)
+        if descent(i - win, i) < d.kink_steep_slope:
+            continue
+        # ...immediately followed by a reversal against the direction
+        ahead = [descent(i, j) for j in range(i + 1, min(n, i + 1 + win))]
+        if ahead and min(ahead) <= d.kink_collapse_slope:
+            del track.points_raw[i + 1:]
+            del track.info_raw[i + 1:]
+            ys2 = [y for _, y in track.points_raw]
+            if ys2:
+                track.y_extremum = max(ys2) if s > 0 else min(ys2)
+            return
+
+
+def _trim_annotation_flats(track: Track, metrics: FigureMetrics) -> None:
+    """Excise a dead-horizontal run the track latched onto (a figure annotation
+    -- an underline, a retention arrow, a legend rule -- not a real plateau).
+
+    Signature (all pre-smoothing, on the raw pixel trace): the curve CUSPS into
+    a run whose pixel-y stays within `flat_band` for at least `flat_min_cols`
+    (>= ~5% of plot width), having been clearly OFF that level just before. A
+    real voltage plateau fails this -- across such a span it drifts more than a
+    stroke width and is approached gradually, not via a cusp. The flat run is
+    removed; points after it are kept only while they continue the pre-flat
+    trajectory, so a curve that genuinely resumes past the line survives while a
+    spurious tail (the common case) is dropped -- then `extend_terminal_drops`
+    can descend the real terminal drop from the restored plateau end."""
+    pts = track.points_raw
+    n = len(pts)
+    if n < 4:
+        return
+    lw = max(1.0, metrics.line_width_px)
+    band = metrics.d.flat_band_lw * lw
+    cusp_band = metrics.d.flat_cusp_band_lw * lw
+    min_span = metrics.flat_min_cols
+
+    a = b = None
+    i = 0
+    while i < n - 1:
+        ymin = ymax = pts[i][1]
+        j = i
+        while j + 1 < n:
+            ny = pts[j + 1][1]
+            lo, hi = min(ymin, ny), max(ymax, ny)
+            if hi - lo > band:
+                break
+            ymin, ymax, j = lo, hi, j + 1
+        if j > i and (pts[j][0] - pts[i][0]) >= min_span:
+            flat_y = 0.5 * (ymin + ymax)
+            x_lo = pts[i][0] - min_span
+            k = i - 1
+            while k >= 0 and pts[k][0] >= x_lo:  # cusp: off the flat level recently
+                if abs(pts[k][1] - flat_y) > cusp_band:
+                    a, b = i, j
+                    break
+                k -= 1
+            if a is not None:
+                break
+        i = j + 1
+    if a is None:
+        return
+
+    keep = list(range(a))  # everything before the flat run
+    pre = pts[max(0, a - 8):a]
+    xs = [p[0] for p in pre]
+    if len(pre) >= 2 and xs[-1] != xs[0]:
+        slope, intercept = np.polyfit(xs, [p[1] for p in pre], 1)
+        for k in range(b + 1, n):  # keep a genuine continuation past the line
+            if abs(pts[k][1] - (slope * pts[k][0] + intercept)) <= metrics.max_jump_px:
+                keep.append(k)
+            else:
+                break
+    if len(keep) == n:
+        return
+    track.points_raw = [pts[k] for k in keep]
+    track.info_raw = [track.info_raw[k] for k in keep]
+    if track.pixel_sign != 0 and track.points_raw:
+        ys = [y for _, y in track.points_raw]
+        track.y_extremum = max(ys) if track.pixel_sign > 0 else min(ys)
 
 
 def extend_terminal_drops(
@@ -528,11 +651,166 @@ def bridge_occluded_segments(
             progressed = True
 
 
+def _isotonic_increasing(y: np.ndarray) -> np.ndarray:
+    """Best non-decreasing fit to `y` (pool-adjacent-violators, equal weights).
+    O(n): each value is pushed as its own block, and adjacent blocks that
+    violate monotonicity are merged into their weighted mean."""
+    blocks: list[list[float]] = []  # [mean, count]
+    for v in y:
+        blocks.append([float(v), 1.0])
+        while len(blocks) > 1 and blocks[-2][0] >= blocks[-1][0]:
+            m2, c2 = blocks.pop()
+            m1, c1 = blocks.pop()
+            blocks.append([(m1 * c1 + m2 * c2) / (c1 + c2), c1 + c2])
+    out = np.empty(len(y))
+    i = 0
+    for mean, count in blocks:
+        out[i:i + int(count)] = mean
+        i += int(count)
+    return out
+
+
+def _directional_scatter(track: Track) -> float:
+    """RMS deviation of the raw trace from the best MONOTONE curve in the
+    track's declared pixel direction, as a fraction of the trace's vertical
+    span. ~0 for any monotone trace regardless of curvature; large only when
+    the trace wanders AGAINST its declared direction -- a scattered overlap
+    smear rather than a real voltage curve. Returns 0.0 (keep) when there are
+    too few points or no vertical extent to judge."""
+    ys = np.array([y for _, y in track.points_raw], dtype=float)
+    if len(ys) < 4:
+        return 0.0
+    span = float(ys.max() - ys.min())
+    if span <= 0.0:
+        return 0.0
+    sign = track.pixel_sign or 1
+    fit = _isotonic_increasing(sign * ys) * sign  # monotone in declared dir
+    resid = float(np.sqrt(np.mean((ys - fit) ** 2)))
+    return resid / span
+
+
+def _adopt_series(track: Track, series: Series, orient: int) -> None:
+    """Bind a (pending) track to a series: set its identity, declared
+    direction, pixel sign, and directional extremum from its current points."""
+    track.series_id = series.id
+    track.direction = series.direction.value
+    track.pixel_sign = _data_sign(series.direction) * orient
+    track.id = f"track_{series.id}"
+    ys = [y for _, y in track.points]
+    track.y_extremum = max(ys) if track.pixel_sign > 0 else min(ys)
+
+
+def _extend_head_backward(
+    track: Track, columns: dict[int, list[float]], metrics: FigureMetrics,
+) -> None:
+    """Grow a track's head leftward over columns a rejected incoherent track
+    had consumed, re-attaching the branch that continues the track's own trend.
+    Follows an already-identified branch, so a monotone-side filter (going
+    backward, the pixel row must move opposite the forward direction) keeps it
+    off a curve lying the other way, and it tolerates a looser per-column jump
+    than forward tracking. Stops after `pending_gap_cols` columns with no
+    on-direction candidate -- so a genuinely mid-plot-starting curve is not
+    pulled into noise. `columns` holds every candidate (tracking never removed
+    them). Points added are real observations."""
+    if len(track.points_raw) < 2 or track.pixel_sign == 0:
+        return
+    window = metrics.slope_window_cols
+    lead_jump = metrics.d.lead_extend_jump_mult * metrics.max_jump_px
+    max_missed = metrics.pending_gap_cols
+    tol = metrics.reversal_tol_px
+    xs_left = sorted((x for x in columns if x < track.points_raw[0][0]),
+                     reverse=True)
+    missed = 0
+    for x in xs_left:
+        head = track.points_raw[:window]
+        hx = np.array([p[0] for p in head], dtype=float)
+        hy = np.array([p[1] for p in head], dtype=float)
+        slope = float(np.polyfit(hx, hy, 1)[0]) if hx[-1] != hx[0] else 0.0
+        x0, y0 = track.points_raw[0]
+        pred = y0 + slope * (x - x0)
+        best = None
+        for y in columns[x]:
+            # backward monotonicity: the branch continues opposite the forward
+            # direction, so exclude candidates on the wrong side (e.g. the
+            # discharge sitting above a charge) -- this, not the jump gate, is
+            # what keeps the lead-in on the right curve.
+            if track.pixel_sign < 0 and y < y0 - tol:
+                continue
+            if track.pixel_sign > 0 and y > y0 + tol:
+                continue
+            d = abs(y - pred)
+            if d <= lead_jump and (best is None or d < best[1]):
+                best = (y, d)
+        if best is None:
+            missed += 1
+            if missed > max_missed:
+                break
+            continue
+        missed = 0
+        track.points_raw.insert(0, (int(x), float(best[0])))
+        if track.info_raw is not None:
+            track.info_raw.insert(0, PointInfo(True, len(columns[x]), 0.0))
+    ys = [y for _, y in track.points_raw]
+    track.y_extremum = max(ys) if track.pixel_sign > 0 else min(ys)
+
+
+def _trim_coasted_tail(track: Track) -> None:
+    """Drop trailing UNOBSERVED points (coasted through occlusion). A coast is
+    only justified if the curve reappeared after it -- points still hold the
+    curve. A track that coasted PAST its true end into a nearby other-colour
+    region leaves speculative points with no real pixel after them; remove them
+    so the track ends at real data (and is not then judged incoherent). Internal
+    coasts, followed by observed points, are untouched."""
+    popped = False
+    while track.points_raw and not track.info_raw[-1].observed:
+        track._pop_tail()
+        popped = True
+    if popped and track.points_raw and track.pixel_sign != 0:
+        ys = [y for _, y in track.points_raw]
+        track.y_extremum = max(ys) if track.pixel_sign > 0 else min(ys)
+
+
+def _reclaim_from_pending(
+    pending: list[Track], freed: list[Series], orient: int,
+    columns: dict[int, list[float]], metrics: FigureMetrics,
+) -> list[Track]:
+    """Try to fill each series freed by the coherence gate with a leftover
+    pending run -- "try for another curve". A candidate must be long enough,
+    move in the series' declared direction, and itself pass the coherence gate;
+    otherwise the series is simply left without a curve (better a gap than a
+    scattered one). A reclaimed run that starts mid-plot is then extended back
+    over the columns the rejected track had consumed."""
+    reclaimed: list[Track] = []
+    avail = list(freed)
+    for p in sorted(pending, key=lambda p: len(p.points), reverse=True):
+        if not avail or len(p.points) < metrics.confirm_run_cols:
+            continue
+        dx = p.last_x - p.points[0][0]
+        if dx < metrics.coherence_min_span_cols:
+            continue  # too short to stand in as a real curve
+        net_sign = int(np.sign(p.last_y - p.points[0][1])) if dx else 0
+        pick = next(
+            (s for s in avail if _data_sign(s.direction) * orient == net_sign),
+            None,
+        )
+        if pick is None:
+            continue
+        _adopt_series(p, pick, orient)
+        if _directional_scatter(p) > metrics.d.coherence_max_scatter:
+            p.series_id = None  # the alternative is no better -- leave it out
+            continue
+        _extend_head_backward(p, columns, metrics)
+        avail.remove(pick)
+        reclaimed.append(p)
+    return reclaimed
+
+
 def track_columns(
     columns: dict[int, list[float]],
     contract: Contract,
     metrics: FigureMetrics,
     series_ids: list[str] | None = None,
+    other_runs: dict[int, list[tuple[float, float, float]]] | None = None,
 ) -> list[Track]:
     """Track every series (optionally restricted to `series_ids` -- the
     caller groups series by shared color and passes one group per call)
@@ -559,6 +837,7 @@ def track_columns(
     max_missed = metrics.deactivate_cols
     min_confirm_run = metrics.confirm_run_cols
     pending_gap = metrics.pending_gap_cols
+    max_coast = metrics.coast_max_cols
 
     tracks, unseeded, init_xs = initialize_tracks(columns, contract, metrics, series_ids)
     series_by_id = {
@@ -592,11 +871,25 @@ def track_columns(
                     # per-point confidence byproducts for smooth.py
                     active[r].advance(x, float(cands[c]), observed=True,
                                       n_clusters=len(cands), cost=float(cost[r, c]))
+                    active[r].coast_run = 0  # re-acquired a real pixel
                     matched_cand_idx.add(c)
 
         for t in active:
             if not t.points_raw or t.last_x != x:
+                # Occlusion-aware coast: if another colour covers where this
+                # track would be, it is hidden (drawn over), not ended -- follow
+                # its prediction to stay alive and re-acquire when it reappears.
+                # Bounded by `max_coast` so a curve that truly ended (no colour
+                # over it) still deactivates. Coasted points are unobserved.
+                if (other_runs is not None and t.points_raw
+                        and t.coast_run < max_coast
+                        and _pred_is_occluded(t, x, other_runs, max_jump, window)):
+                    t.advance(x, float(predict_next_y(t, x, window)),
+                              observed=False, n_clusters=1)
+                    t.coast_run += 1
+                    continue
                 t.missed += 1
+                t.coast_run = 0
                 if t.missed > max_missed:
                     t.active = False
                     # A seed that never ESTABLISHED a real trajectory releases
@@ -652,12 +945,7 @@ def track_columns(
                 )
                 if pick is not None:
                     unseeded.remove(pick)
-                    p.series_id = pick.id
-                    p.direction = pick.direction.value
-                    p.pixel_sign = _data_sign(pick.direction) * orient
-                    p.id = f"track_{pick.id}"
-                    ys = [y for _, y in p.points]
-                    p.y_extremum = max(ys) if p.pixel_sign > 0 else min(ys)
+                    _adopt_series(p, pick, orient)
                     tracks.append(p)
                 else:
                     # confirmed but no matching series free yet -- keep it
@@ -670,7 +958,30 @@ def track_columns(
     # drop orphaned stubs whose series was released to a cleaner branch
     tracks = [t for t in tracks if t.series_id is not None]
     for t in tracks:
+        _trim_coasted_tail(t)
+        _trim_kink(t, metrics)
+        _trim_annotation_flats(t, metrics)
         _trim_sparse_tail(t, window=metrics.trim_window_cols)
         _trim_outlier_head(t, probe=metrics.head_probe_cols,
                            max_residual=metrics.head_residual_px)
-    return tracks
+
+    # Coherence gate: a finished track that wanders against its declared
+    # direction far more than its own vertical span is a scattered overlap
+    # smear, not a real curve. Drop it; free its series and try to reclaim a
+    # cleaner run left in the pending pool ("try for another curve"). Done
+    # after the trims so a curve isn't judged on a stray head/tail it just shed.
+    kept: list[Track] = []
+    freed: list[Series] = []
+    min_span = metrics.coherence_min_span_cols
+    for t in tracks:
+        span = t.last_x - t.points_raw[0][0] if t.points_raw else 0
+        if (span >= min_span
+                and _directional_scatter(t) > metrics.d.coherence_max_scatter):
+            s = series_by_id.get(t.series_id)
+            if s is not None:
+                freed.append(s)
+        else:
+            kept.append(t)
+    if freed:
+        kept.extend(_reclaim_from_pending(pending, freed, orient, columns, metrics))
+    return kept

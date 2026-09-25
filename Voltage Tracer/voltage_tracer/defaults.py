@@ -85,6 +85,17 @@ class Defaults:
     # is already resolution-invariant, so express it per stroke width.
     link_tol_lw: float = 4.0
 
+    # --- tracker: occlusion-aware coasting ---
+    # A curve that another colour is drawn over for a stretch (two near-
+    # coincident cells, e.g. coated vs bare) vanishes from its own mask and,
+    # untreated, the online tracker deactivates it as if it ended. When the
+    # column it WOULD occupy is covered by another colour, coast the track on
+    # its prediction instead of counting a miss, so it stays alive and re-
+    # acquires when it reappears -- bounded to this fraction of plot width so a
+    # curve that genuinely ends (no occlusion) still deactivates promptly. The
+    # coasted points are marked unobserved (down-weighted, filterable).
+    coast_max_wfrac: float = 0.16
+
     # --- tracker: terminal-drop extension ---
     ext_run_gap_hfrac: float = 0.15    # vertical occlusion tolerated between fragments
     ext_min_extension_hfrac: float = 0.030  # minimum total descent to commit
@@ -108,6 +119,63 @@ class Defaults:
                                           # terminal drop is 5-20 -> the wrong segment)
     bridge_min_chain_wfrac: float = 0.020 # a continuation chain must span this wide
 
+    # --- tracker: coherence gate (reject a scattered, non-curve track) ---
+    # A finished track whose raw trace departs from the best MONOTONE curve in
+    # its declared direction by more than this fraction of its own vertical
+    # span is not a real voltage curve -- it is a flat, scattered overlap smear
+    # the tracker latched onto (e.g. a heavily-occluded high-rate charge that
+    # has no clean rising line). It is dropped and its series offered back to
+    # the pending pool so a cleaner branch can be tried in its place. The metric
+    # is a direction-aware isotonic residual / span, so a genuine S-shaped
+    # (curved but monotone) profile scores ~0 and is never rejected; only a
+    # trace that wanders AGAINST its declared direction scores high (a chaotic
+    # band scores ~0.3, clean curves <0.01).
+    coherence_max_scatter: float = 0.12
+    # Only judge coherence for a track that spans at least this fraction of the
+    # plot width -- enough to be a real curve. Shorter fragments/stubs (a failed
+    # trace in a low-capacity tangle) are left to the other trims: their tiny
+    # span makes the ratio metric unreliable, and rejecting them is a separate
+    # concern from "a full curve was traced from chaos".
+    coherence_min_span_wfrac: float = 0.10
+    # When a reclaimed curve starts mid-plot (its early part was consumed by a
+    # rejected incoherent track), scan back over the columns to its left and
+    # re-attach the branch that continues its trend -- "rescan that x range for
+    # more valid curves". The lead-in follows an ALREADY-identified branch, and
+    # a monotone-side filter keeps it off curves lying the other way, so it can
+    # tolerate a looser per-column jump than forward tracking: this multiple of
+    # the normal jump gate. It stops once no on-direction candidate is found.
+    lead_extend_jump_mult: float = 2.0
+
+    # --- kink trim (a steep run that abruptly reverses -- jog onto an annot) ---
+    # In a near-vertical terminal drop the raw slope is steep and consistent; a
+    # jog onto a horizontal annotation (or wrong branch) reverses it abruptly --
+    # a very large second derivative. Detect a steep descent (|dy/dx| in the
+    # declared direction >= kink_steep_slope, i.e. near-vertical) immediately
+    # followed by a REVERSAL (slope <= kink_collapse_slope, moving back against
+    # the direction) and truncate to the last steep point, so the terminal-drop
+    # pass then follows the true slope down. A real curve turns gradually (small
+    # second derivative) and a real drop bottom just decelerates (never
+    # reverses), so both are untouched.
+    kink_steep_slope: float = 2.75    # dy/dx ~ tan(70deg): near-vertical
+    kink_collapse_slope: float = -0.5  # a clear reversal against the direction
+
+    # --- annotation-flat trim (a horizontal figure line mistraced as curve) ---
+    # A curve that abruptly flattens (a CUSP into a dead-horizontal run) and
+    # stays flat for a long stretch has almost certainly latched onto a figure
+    # annotation -- an underline, a retention arrow, a legend rule -- not a real
+    # plateau (which slopes across such a span and is approached gradually). The
+    # flat run is excised; points after it are kept only if they continue the
+    # pre-flat trajectory (so a curve resuming past the line survives).
+    flat_band_lw: float = 0.5          # "horizontal" = pixel-y stays within this
+                                       # many stroke widths across the WHOLE run --
+                                       # a DRAWN line is dead flat (~0 drift); even a
+                                       # gentle real plateau (or a high-rate curve's
+                                       # brief flat start) wobbles more than this over
+                                       # a 5%-width span
+    flat_min_wfrac: float = 0.05       # ...for at least this fraction of plot width
+    flat_cusp_band_lw: float = 3.0     # entered via a cusp: the curve was this many
+                                       # stroke widths off the flat level just before
+
     # --- pending-pool / misc counts ---
     pending_gap_wfrac: float = 0.006   # max column gap when growing a pending run
     pending_drop_cols: int = 3         # confirm within this many missed cols or drop
@@ -116,6 +184,18 @@ class Defaults:
     # --- text-region auto-detection (fractions of plot dims / Lab units) ---
     text_chroma_max: float = 22.0      # a glyph is near-neutral in Lab chroma
     text_dark_lfrac: float = 0.6       # and darker than this fraction of full L
+    # COLOURED annotations (a red "79.0%" arrow-label, a blue "73.5%") share a
+    # series' colour, so the achromatic text pass misses them and a curve then
+    # traces their strokes. `colored_annotation_mask` handles them PER colour
+    # (so differently-coloured dashes never fuse) and ONLY on small isolated
+    # components -- a curve, or its steep terminal drop, is one large connected
+    # component and is always spared. Two kinds are masked: glyph clusters
+    # (labels) and long thin horizontal rules/arrows.
+    annot_detect_colored: bool = True
+    annot_curve_span_frac: float = 0.5   # a component spanning >= this frac of
+                                         # plot width OR height is a curve: spare it
+    annot_rule_min_wfrac: float = 0.10   # a rule/arrow spans >= this frac of width
+    annot_rule_max_lw: float = 2.5       # ...and is <= this many stroke widths thick
     glyph_min_hfrac: float = 0.012     # glyph height band, fraction of plot height
     glyph_max_hfrac: float = 0.10
     glyph_max_wfrac: float = 0.10      # a single glyph is not very wide

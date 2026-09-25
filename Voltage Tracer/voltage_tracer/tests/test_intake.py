@@ -1,7 +1,7 @@
 """intake.py tests -- synthetic PDFs built with PyMuPDF, fully deterministic."""
 import json
 
-import fitz
+import pymupdf
 import pytest
 
 from voltage_tracer.intake import (
@@ -15,7 +15,7 @@ from voltage_tracer.intake import (
 def _make_pdf(path, pages):
     """Build a PDF. `pages` is a list of lists of (x, y, text) draw commands;
     a rectangle is also drawn on each page so figure regions have ink."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     for items in pages:
         page = doc.new_page(width=595, height=842)  # A4 points
         for x, y, text in items:
@@ -103,7 +103,7 @@ def test_rendered_image_respects_resolution_cap(tmp_path):
     pdf = tmp_path / "P4.pdf"
     _make_pdf(pdf, [_fig_page("Figure 1. Voltage profiles.", body_y=60, caption_y=800)])
     assets = extract_figures(pdf, tmp_path / "out")
-    with fitz.open(assets[0].image_path) as img:
+    with pymupdf.open(assets[0].image_path) as img:
         page = img[0]
         assert max(page.rect.width, page.rect.height) <= MAX_EDGE_PX
 
@@ -125,7 +125,7 @@ def test_extract_scalar_sentences_caps_output(tmp_path):
     pdf = tmp_path / "big.pdf"
     lines = [(72, 100 + 15 * i, f"The loading was {i} mg/cm2 here.") for i in range(30)]
     _make_pdf(pdf, [lines])
-    with fitz.open(pdf) as doc:
+    with pymupdf.open(pdf) as doc:
         assert len(extract_scalar_sentences(doc)) <= 12
 
 

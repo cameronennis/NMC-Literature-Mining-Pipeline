@@ -52,30 +52,63 @@ Because contracts are just JSON on disk, you can re-run tracing and compilation
 as many times as you like — tune a threshold, fix a bug — **without paying for
 the vision calls again** (`--no-reason`).
 
-## Install
+## Setup (one time)
+
+Requires Python ≥ 3.11. From the `Voltage Tracer/` folder, create a virtual
+environment and install the tool into it:
 
 ```bash
-pip install -e .
+python3 -m venv .venv
+.venv/bin/pip install -e .
 ```
 
-Requires Python ≥ 3.11. The `anthropic` SDK is only imported by the reason
-stage (lazily), so intake/trace/compile work without a key.
+That installs the `voltage-tracer` command inside `.venv/bin/`. Then make an
+Anthropic key available to the shell (only the reason stage needs it — see
+[Credentials](#credentials)):
 
-## Quickstart
+```bash
+export ANTHROPIC_API_KEY=sk-...
+```
+
+The `anthropic` SDK is imported lazily by the reason stage only, so
+intake/trace/compile work without a key.
+
+## Run
+
+The run syntax is always `voltage-tracer --pdf-dir <papers> --out-dir <output>`,
+plus optional flags. Using the venv's copy directly (no `activate` needed):
 
 ```bash
 # Cheap trial: 5 figures, watch the verdicts and cost before committing
-voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --limit 5
+.venv/bin/voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --limit 5
 
 # Full run
-voltage-tracer --pdf-dir <paper pdf directory> --out-dir run
+.venv/bin/voltage-tracer --pdf-dir <paper pdf directory> --out-dir run
 
-# Re-trace / re-compile without re-paying for reasoning
-voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --no-reason
+# Re-trace / re-compile without re-paying for reasoning (reuses contracts on disk)
+.venv/bin/voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --no-reason
 
 # Reconcile a reused out-dir to the current PDFs (prune stale, skip identical re-renders)
-voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --fresh
+.venv/bin/voltage-tracer --pdf-dir <paper pdf directory> --out-dir run --fresh
 ```
+
+(If you `source .venv/bin/activate` first, drop the `.venv/bin/` prefix and just
+call `voltage-tracer …`.)
+
+### Flags
+
+| Flag | Purpose |
+|---|---|
+| `--pdf-dir` *(required)* | directory of paper PDFs |
+| `--out-dir` *(required)* | run root; stage folders `figures/ contracts/ traces/ compiled/` are created under it |
+| `--limit N` | cap how many figures the reason stage processes (cost trial) |
+| `--no-reason` | skip the token stage; reuse contracts already in `<out-dir>/contracts` |
+| `--fresh` | reconcile `out-dir` to the current PDFs (prune stale, skip identical re-renders) |
+| `--model` | reasoning model (default `claude-fable-5`) — see [Model selection](#model-selection) |
+| `--fallback-model` | refusal fallback model, or `none` to disable (default `claude-opus-4-8`) |
+| `--certainty` | min legend↔curve certainty to accept, else *flagged* (default 0.95) |
+| `--max-tokens` | reason-call output cap; raise if a figure reports *output truncated at max_tokens* |
+| `--debug` | save a debug overlay per traced figure |
 
 **Reusing an `--out-dir`.** By default a run overwrites same-named files but
 leaves files from a prior run in place, so pointing a smaller corpus at a
@@ -85,9 +118,12 @@ in the current run and skips re-rendering figures that already exist, so
 nothing identical is needlessly rewritten. Manifests are always preserved. One
 `--out-dir` per corpus is still the simplest rule; `--fresh` makes reuse safe.
 
+## Credentials
+
 Credentials resolve the standard way (`ANTHROPIC_API_KEY`, or an
 `ant auth login` profile) — the reason stage constructs a plain
-`anthropic.Anthropic()`.
+`anthropic.Anthropic()`. Only the reason stage needs one;
+`--no-reason` runs need no key.
 
 ## Model selection
 

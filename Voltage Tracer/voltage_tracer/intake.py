@@ -39,7 +39,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF (the legacy top-level name "fitz" is deprecated)
 
 # Vision models gain nothing above this and every extra pixel costs tokens.
 MAX_EDGE_PX = 2576
@@ -188,7 +188,7 @@ def _render(page, rect, out_path: Path) -> None:
     long_edge_pt = max(x1 - x0, y1 - y0)
     # 300 dpi baseline (72 pt/inch), then clamp so we never exceed the cap.
     zoom = min(300.0 / 72.0, MAX_EDGE_PX / long_edge_pt)
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=fitz.Rect(x0, y0, x1, y1))
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=pymupdf.Rect(x0, y0, x1, y1))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pix.save(str(out_path))
 
@@ -238,7 +238,7 @@ def extract_figures(
     out_dir.mkdir(parents=True, exist_ok=True)
     assets: list[FigureAsset] = []
 
-    with fitz.open(pdf_path) as doc:
+    with pymupdf.open(pdf_path) as doc:
         scalars = extract_scalar_sentences(doc)
         scalar_block = (
             "\n\nPossibly relevant sentences from the paper (for nominal capacity / "

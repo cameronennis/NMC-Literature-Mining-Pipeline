@@ -180,11 +180,60 @@ def detect_text_regions(
     h, w = crop.shape[:2]
     lab = cv2.cvtColor(crop, cv2.COLOR_RGB2LAB).astype(float)
     chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
-    glyph_px = (chroma < d.text_chroma_max) & (lab[..., 0] < d.text_dark_lfrac * 255)
+    achromatic = (chroma < d.text_chroma_max) & (lab[..., 0] < d.text_dark_lfrac * 255)
     # Reference stroke width for the thin-diagonal test (the caller passes the
     # measured curve stroke width; fall back to the glyph ink's own width).
-    lw = line_width if line_width is not None else _measure_line_width([glyph_px])
+    lw = line_width if line_width is not None else _measure_line_width([achromatic])
 
+    return _glyph_clusters(achromatic, h, w, lw, d)
+
+
+def colored_annotation_mask(
+    crop: np.ndarray, series_colors: list[tuple[int, int, int]],
+    color_tol: float, lw: float, d: Defaults
+) -> np.ndarray:
+    """Boolean mask of COLOURED annotations that share a series colour and a
+    curve would otherwise trace: text labels (a red "79.0%") and thin
+    horizontal rules/arrows. Worked PER colour so differently-coloured dashes
+    never fuse, and only on SMALL isolated components -- a curve, or its steep
+    terminal drop, is one large connected component and is always spared."""
+    from voltage_tracer.preprocess import color_mask  # local: avoid import cycle
+
+    h, w = crop.shape[:2]
+    out = np.zeros((h, w), dtype=bool)
+    big_w, big_h = d.annot_curve_span_frac * w, d.annot_curve_span_frac * h
+    rule_min_w, rule_max_h = d.annot_rule_min_wfrac * w, d.annot_rule_max_lw * lw
+    for c in series_colors:
+        cm = color_mask(crop, c, tolerance=color_tol, hue_recover=True)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(
+            cm.astype(np.uint8), connectivity=8)
+        small = np.zeros((h, w), dtype=bool)  # everything but curve-sized blobs
+        for i in range(1, num):
+            _, _, bw, bh, _ = stats[i]
+            if bw >= big_w or bh >= big_h:
+                continue  # a curve / its drop -- never mask
+            small |= labels == i
+            # a long, thin, horizontal rule or arrow (isolated from the curve)
+            if bw >= rule_min_w and bh <= rule_max_h:
+                out |= labels == i
+        # glyph-cluster label regions: mask the small components inside them
+        # (the large curve is excluded from `small`, so it is spared even when
+        # a label's bounding box overlaps it)
+        for x1, y1, x2, y2 in _glyph_clusters(cm, h, w, lw, d):
+            box = np.zeros((h, w), dtype=bool)
+            box[y1:y2, x1:x2] = True
+            out |= small & box
+    if out.any():
+        out = cv2.dilate(out.astype(np.uint8),
+                         cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))).astype(bool)
+    return out
+
+
+def _glyph_clusters(
+    glyph_px: np.ndarray, h: int, w: int, lw: float, d: Defaults
+) -> list[BBox]:
+    """Cluster an ink mask into text-label bounding boxes (the two-stage logic
+    shared by the achromatic and coloured passes of `detect_text_regions`)."""
     # stage 1: scan components once. Keep small components as the
     # text-stroke mask (glyphs AND thin punctuation like `=` / parens), and
     # collect STRONG glyphs -- glyph-sized, well-filled -- as (x, y, h)
@@ -323,6 +372,18 @@ class FigureMetrics:
     @property
     def bridge_min_chain_cols(self) -> int:
         return self._cols(self.d.bridge_min_chain_wfrac, floor=3)
+
+    @property
+    def flat_min_cols(self) -> int:
+        return self._cols(self.d.flat_min_wfrac, floor=5)
+
+    @property
+    def coherence_min_span_cols(self) -> int:
+        return self._cols(self.d.coherence_min_span_wfrac, floor=10)
+
+    @property
+    def coast_max_cols(self) -> int:
+        return self._cols(self.d.coast_max_wfrac, floor=8)
 
     # --- vertical tolerances (pixels) ---
     @property

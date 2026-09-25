@@ -150,6 +150,19 @@ def test_legend_override_bbox_masks_exactly_that_region():
     assert not mask_outside.any()
 
 
+def test_legend_override_spares_transiting_curve():
+    # an over-large legend box that a colored curve passes through: the curve
+    # (a tall saturated stroke spanning the box) is spared, while a short
+    # swatch and the empty box area stay masked.
+    img = _blank()
+    img[30:90, 348:351] = (30, 30, 200)   # vertical blue curve through the box
+    img[40:43, 305:325] = (30, 30, 200)   # a short blue swatch inside the box
+    mask = mask_legend_region(img, override_bbox=(300, 30, 380, 90))
+    assert not mask[60, 349], "a curve transiting the legend box must be spared"
+    assert mask[41, 315], "a short swatch must stay masked"
+    assert mask[80, 360], "empty legend area must stay masked"
+
+
 def test_legend_heuristic_finds_swatch_with_text():
     img = _blank()
     # swatch: short saturated red dash; "text": dark blob to its right
@@ -261,3 +274,24 @@ def test_color_mask_separates_distinct_colors():
     red_mask = color_mask(img, (220, 30, 30), tolerance=25)
     assert red_mask[100:110, 50:100].all()
     assert not red_mask[200:210, 50:100].any()
+
+
+def test_hue_recover_catches_desaturated_stroke_not_background_or_neighbour():
+    """hue_recover adds a curve's darkened/desaturated pixels (same hue) that
+    the distance mask misses, without sweeping in the pale background or a
+    different-hued neighbour."""
+    img = np.full((20, 20, 3), 245, np.uint8)      # near-white background,
+    img[..., 1] = 236; img[..., 2] = 230           # faintly warm-tinted
+    img[2:5, 2:5] = (220, 30, 40)                  # bright saturated red
+    img[2:5, 8:11] = (120, 92, 86)                 # dark desaturated red (same hue)
+    img[10:13, 2:5] = (30, 40, 200)                # blue neighbour
+
+    off = color_mask(img, (220, 30, 40), tolerance=45.0, hue_recover=False)
+    on = color_mask(img, (220, 30, 40), tolerance=45.0, hue_recover=True)
+    assert off[3, 3] and on[3, 3], "bright core lost"
+    assert not off[3, 9] and on[3, 9], "desaturated stroke not recovered by hue"
+    assert not on[11, 3], "blue neighbour leaked into the red mask"
+    assert not on[0, 0], "pale background swept into the red mask"
+    # and red/blue masks stay disjoint under hue recovery
+    blue = color_mask(img, (30, 40, 200), tolerance=45.0, hue_recover=True)
+    assert blue[11, 3] and not blue[3, 3]

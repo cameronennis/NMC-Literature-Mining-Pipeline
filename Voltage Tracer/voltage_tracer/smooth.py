@@ -121,15 +121,33 @@ def smooth_track(
         ysm = spline(xf)
 
     # monotone-project in the declared pixel direction, then pin the exact
-    # raw endpoints. Bounding the projection by the (extremal) endpoints and
-    # pinning last keeps both guarantees compatible without a special case.
-    lo, hi = min(ys[0], ys[-1]), max(ys[0], ys[-1])
+    # raw endpoints. Bound the projection by the raw trace's full extent, not
+    # just its two endpoints: when the final raw point is a small dip rather
+    # than the curve's extreme (a slight terminal hook), endpoint-only bounds
+    # put the clip floor above the true peak and clamp it down to the dip --
+    # the "smoothed tail flatlines" bug. The full-extent bound keeps a genuine
+    # terminal-drop corner intact (there the endpoint IS the extreme) while
+    # letting a real interior peak stand.
+    lo, hi = float(ys.min()), float(ys.max())
     if track.pixel_sign > 0:
         ysm = np.maximum.accumulate(ysm)
     elif track.pixel_sign < 0:
         ysm = np.minimum.accumulate(ysm)
     ysm = np.clip(ysm, lo, hi)
-    ysm[0], ysm[-1] = ys[0], ys[-1]
+
+    # Pin the endpoints to the raw trace. The start pins exactly; the end pins
+    # exactly too UNLESS the raw last point opposes the declared direction (a
+    # slight terminal hook / dip), in which case it is clamped to the monotone
+    # value. A genuine terminal drop still pins exactly -- there the raw
+    # endpoint IS the monotone extreme -- but a hook no longer flattens the
+    # tail (the old clip-to-endpoint behavior) nor breaks monotonicity.
+    ysm[0] = ys[0]
+    if track.pixel_sign > 0:
+        ysm[-1] = max(ys[-1], ysm[-2])
+    elif track.pixel_sign < 0:
+        ysm[-1] = min(ys[-1], ysm[-2])
+    else:
+        ysm[-1] = ys[-1]
 
     track.points_smooth = [(int(rx), float(sy)) for rx, sy in zip(xs, ysm)]
     return track
